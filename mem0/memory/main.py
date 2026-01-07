@@ -204,6 +204,13 @@ class Memory(MemoryBase):
             self.enable_graph = True
         else:
             self.graph = None
+
+        # Entity extraction configuration (for fast search without LLM at search-time)
+        self.enable_entity_extraction = self.config.enable_entity_extraction
+        self.enable_entity_search = self.config.enable_entity_search
+        self._entity_index = None  # Lazy loaded when needed
+        self._llm_provider = self.config.llm.provider  # Store for entity extractor
+
         # Create telemetry config manually to avoid deepcopy issues with thread locks
         telemetry_config_dict = {}
         if hasattr(self.config.vector_store.config, 'model_dump'):
@@ -286,6 +293,8 @@ class Memory(MemoryBase):
         agent_id: Optional[str] = None,
         run_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        timestamp: Optional[int] = None,
+        event_date: Optional[str] = None,
         infer: bool = True,
         memory_type: Optional[str] = None,
         prompt: Optional[str] = None,
@@ -303,6 +312,11 @@ class Memory(MemoryBase):
             agent_id (str, optional): ID of the agent creating the memory. Defaults to None.
             run_id (str, optional): ID of the run creating the memory. Defaults to None.
             metadata (dict, optional): Metadata to store with the memory. Defaults to None.
+            timestamp (int, optional): Unix timestamp for when the memory was created.
+                If not provided, current time is used. Useful for importing historical data.
+            event_date (str, optional): Date when the event occurred in YYYY-MM-DD format.
+                This is added to the event_dates array for date-based filtering.
+                Example: "2024-01-15" for January 15, 2024.
             infer (bool, optional): If True (default), an LLM is used to extract key facts from
                 'messages' and decide whether to add, update, or delete related memories.
                 If False, 'messages' are added as raw memories directly.
@@ -367,7 +381,7 @@ class Memory(MemoryBase):
             messages = parse_vision_messages(messages)
 
         with concurrent.futures.ThreadPoolExecutor() as executor:
-            future1 = executor.submit(self._add_to_vector_store, messages, processed_metadata, effective_filters, infer)
+            future1 = executor.submit(self._add_to_vector_store, messages, processed_metadata, effective_filters, infer, timestamp, event_date)
             future2 = executor.submit(self._add_to_graph, messages, effective_filters)
 
             concurrent.futures.wait([future1, future2])
@@ -383,7 +397,7 @@ class Memory(MemoryBase):
 
         return {"results": vector_store_result}
 
-    def _add_to_vector_store(self, messages, metadata, filters, infer):
+    def _add_to_vector_store(self, messages, metadata, filters, infer, timestamp=None, event_date=None):
         if not infer:
             returned_memories = []
             for message_dict in messages:
@@ -407,7 +421,7 @@ class Memory(MemoryBase):
 
                 msg_content = message_dict["content"]
                 msg_embeddings = self.embedding_model.embed(msg_content, "add")
-                mem_id = self._create_memory(msg_content, msg_embeddings, per_msg_meta)
+                mem_id = self._create_memory(msg_content, msg_embeddings, per_msg_meta, timestamp=timestamp, event_date=event_date)
 
                 returned_memories.append(
                     {
@@ -536,6 +550,8 @@ class Memory(MemoryBase):
                             data=action_text,
                             existing_embeddings=new_message_embeddings,
                             metadata=deepcopy(metadata),
+                            timestamp=timestamp,
+                            event_date=event_date,
                         )
                         returned_memories.append({"id": memory_id, "memory": action_text, "event": event_type})
                     elif event_type == "UPDATE":
@@ -814,6 +830,44 @@ class Memory(MemoryBase):
             # Simple filters, merge directly
             effective_filters.update(filters)
 
+        # Fast entity/relationship/date matching (no LLM call at search time)
+        entity_match_result = None
+        if self.enable_entity_search and user_id:
+            try:
+                from mem0.memory.entity_matcher import EntityMatcher
+                from mem0.memory.entity_index import EntityIndexManager
+
+                # Lazy initialize entity index
+                if self._entity_index is None:
+                    self._entity_index = EntityIndexManager(self.vector_store)
+
+                # Get known entities for this user
+                known_entities = self._entity_index.get_known_entities(user_id, agent_id, run_id)
+
+                # Match entities, relationships, and dates from query
+                matcher = EntityMatcher()
+                entity_match_result = matcher.match(query, user_id, known_entities)
+
+                # NOTE: Entity-based filters are NOT applied to vector store queries because
+                # entity fields are stored as JSON strings (for vector store compatibility)
+                # and vector stores can't filter JSON strings with "in" operators.
+                # Instead, we rely on:
+                # 1. Semantic search to find relevant memories
+                # 2. Entity matching to determine query intent
+                # 3. Post-processing to filter/rank results and extract relations
+
+                if entity_match_result.get("entities"):
+                    logger.debug(f"Entity search: matched entities {entity_match_result['entities']}")
+
+                if entity_match_result.get("relationship_types"):
+                    logger.debug(f"Entity search: matched relationship types {entity_match_result['relationship_types']}")
+
+                if entity_match_result.get("date_filter"):
+                    logger.debug(f"Entity search: date filter {entity_match_result['date_filter']} (will apply soft boost)")
+
+            except Exception as e:
+                logger.warning(f"Entity matching failed: {e}")
+
         keys, encoded_ids = process_telemetry_filters(effective_filters)
         capture_event(
             "mem0.search",
@@ -826,6 +880,7 @@ class Memory(MemoryBase):
                 "sync_type": "sync",
                 "threshold": threshold,
                 "advanced_filters": bool(filters and self._has_advanced_operators(filters)),
+                "entity_search": self.enable_entity_search,
             },
         )
 
@@ -850,8 +905,71 @@ class Memory(MemoryBase):
             except Exception as e:
                 logger.warning(f"Reranking failed, using original results: {e}")
 
+        # Apply soft boost for date-matching memories
+        if self.enable_entity_search and entity_match_result and entity_match_result.get("date_filter"):
+            date_filter = entity_match_result["date_filter"]
+            start_date = date_filter.get("start")
+            end_date = date_filter.get("end")
+
+            if start_date and original_memories:
+                for mem in original_memories:
+                    if not mem or not isinstance(mem, dict):
+                        continue
+                    metadata = mem.get("metadata") or {}
+                    event_dates = metadata.get("event_dates", [])
+
+                    # Check if any event_date falls within the date range
+                    date_match = False
+                    for event_date in event_dates:
+                        if not event_date:
+                            continue
+                        # Check if event_date is within [start_date, end_date] range
+                        if start_date == end_date:
+                            # Exact date match
+                            date_match = (event_date == start_date)
+                        else:
+                            # Date range match (string comparison works for YYYY-MM-DD format)
+                            date_match = (start_date <= event_date <= end_date)
+                        if date_match:
+                            break
+
+                    if date_match:
+                        # Boost score by 50% for date matches
+                        if "score" in mem and mem["score"] is not None:
+                            mem["score"] = mem["score"] * 1.5
+                            logger.debug(f"Boosted score for date match: {mem.get('memory', '')[:50]}...")
+
+                # Re-sort by boosted scores (higher score = more relevant)
+                original_memories = sorted(
+                    original_memories,
+                    key=lambda x: x.get("score", 0) if x else 0,
+                    reverse=True
+                )
+
+        # Build response
         if self.enable_graph:
             return {"results": original_memories, "relations": graph_entities}
+
+        # If entity search is enabled, extract relationships from memory metadata
+        if self.enable_entity_search and entity_match_result:
+            relations = []
+            detected_rel_types = set(entity_match_result.get("relationship_types", []))
+
+            for mem in original_memories:
+                if not mem or not isinstance(mem, dict):
+                    continue
+                metadata = mem.get("metadata") or {}
+                mem_rels = metadata.get("relationships", [])
+                if mem_rels:
+                    # Filter by detected relationship types if any
+                    if detected_rel_types:
+                        filtered_rels = [r for r in mem_rels if r.get("relationship") in detected_rel_types]
+                        relations.extend(filtered_rels)
+                    else:
+                        relations.extend(mem_rels)
+
+            if relations:
+                return {"results": original_memories, "relations": relations}
 
         return {"results": original_memories}
 
@@ -1072,7 +1190,7 @@ class Memory(MemoryBase):
         capture_event("mem0.history", self, {"memory_id": memory_id, "sync_type": "sync"})
         return self.db.get_history(memory_id)
 
-    def _create_memory(self, data, existing_embeddings, metadata=None):
+    def _create_memory(self, data, existing_embeddings, metadata=None, timestamp=None, event_date=None):
         logger.debug(f"Creating memory with {data=}")
         if data in existing_embeddings:
             embeddings = existing_embeddings[data]
@@ -1082,13 +1200,49 @@ class Memory(MemoryBase):
         metadata = metadata or {}
         metadata["data"] = data
         metadata["hash"] = hashlib.md5(data.encode()).hexdigest()
-        metadata["created_at"] = datetime.now(pytz.timezone("US/Pacific")).isoformat()
+
+        # Use custom timestamp if provided, otherwise use current time
+        if timestamp:
+            metadata["created_at"] = datetime.fromtimestamp(timestamp, pytz.timezone("US/Pacific")).isoformat()
+        else:
+            metadata["created_at"] = datetime.now(pytz.timezone("US/Pacific")).isoformat()
+
+        # Extract entities and relationships at write-time for fast search
+        if self.enable_entity_extraction and self.llm:
+            try:
+                from mem0.memory.entity_extractor import EntityExtractor
+                extractor = EntityExtractor(self.llm, self._llm_provider)
+                extraction = extractor.extract(data, metadata.get("user_id", "user"))
+
+                metadata["entities"] = extraction.get("entities", [])
+                metadata["relationships"] = extraction.get("relationships", [])
+                metadata["entity_names"] = extraction.get("entity_names", [])
+                metadata["relationship_types"] = extraction.get("relationship_types", [])
+                metadata["event_dates"] = extraction.get("event_dates", [])
+
+                entity_count = len(metadata.get("entities", []))
+                rel_count = len(metadata.get("relationships", []))
+
+                logger.debug(f"Extracted {entity_count} entities and {rel_count} relationships")
+            except Exception as e:
+                logger.warning(f"Entity extraction failed: {e}")
+
+        # Add explicit event_date if provided
+        if event_date:
+            if "event_dates" not in metadata:
+                metadata["event_dates"] = []
+            if event_date not in metadata["event_dates"]:
+                metadata["event_dates"].append(event_date)
 
         self.vector_store.insert(
             vectors=[embeddings],
             ids=[memory_id],
             payloads=[metadata],
         )
+
+        # Invalidate entity index cache for this user
+        if self._entity_index and metadata.get("user_id"):
+            self._entity_index.invalidate(metadata["user_id"])
         self.db.add_history(
             memory_id,
             None,

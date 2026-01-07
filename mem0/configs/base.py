@@ -64,6 +64,14 @@ class MemoryConfig(BaseModel):
         description="Custom prompt for the update memory",
         default=None,
     )
+    enable_entity_extraction: bool = Field(
+        description="Extract entities/relationships at add-time and store in metadata for fast search",
+        default=False,
+    )
+    enable_entity_search: bool = Field(
+        description="Use pre-extracted entities for fast search filtering (no LLM at search)",
+        default=False,
+    )
 
 
 class AzureConfig(BaseModel):

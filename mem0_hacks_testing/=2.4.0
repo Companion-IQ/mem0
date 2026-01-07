@@ -1,0 +1,24 @@
+Collecting pymilvus
+  Downloading pymilvus-2.6.6-py3-none-any.whl.metadata (6.8 kB)
+Collecting setuptools>69 (from pymilvus)
+  Using cached setuptools-80.9.0-py3-none-any.whl.metadata (6.6 kB)
+Requirement already satisfied: grpcio!=1.68.0,!=1.68.1,!=1.69.0,!=1.70.0,!=1.70.1,!=1.71.0,!=1.72.1,!=1.73.0,>=1.66.2 in ./.venv/lib64/python3.13/site-packages (from pymilvus) (1.76.0)
+Requirement already satisfied: orjson>=3.10.15 in ./.venv/lib64/python3.13/site-packages (from pymilvus) (3.11.5)
+Requirement already satisfied: protobuf>=5.27.2 in ./.venv/lib64/python3.13/site-packages (from pymilvus) (5.29.5)
+Requirement already satisfied: python-dotenv<2.0.0,>=1.0.1 in ./.venv/lib64/python3.13/site-packages (from pymilvus) (1.2.1)
+Collecting pandas>=1.2.4 (from pymilvus)
+  Using cached pandas-2.3.3-cp313-cp313-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl.metadata (91 kB)
+Requirement already satisfied: typing-extensions~=4.12 in ./.venv/lib64/python3.13/site-packages (from grpcio!=1.68.0,!=1.68.1,!=1.69.0,!=1.70.0,!=1.70.1,!=1.71.0,!=1.72.1,!=1.73.0,>=1.66.2->pymilvus) (4.15.0)
+Requirement already satisfied: numpy>=1.26.0 in ./.venv/lib64/python3.13/site-packages (from pandas>=1.2.4->pymilvus) (2.4.0)
+Requirement already satisfied: python-dateutil>=2.8.2 in ./.venv/lib64/python3.13/site-packages (from pandas>=1.2.4->pymilvus) (2.9.0.post0)
+Requirement already satisfied: pytz>=2020.1 in ./.venv/lib64/python3.13/site-packages (from pandas>=1.2.4->pymilvus) (2025.2)
+Collecting tzdata>=2022.7 (from pandas>=1.2.4->pymilvus)
+  Downloading tzdata-2025.3-py2.py3-none-any.whl.metadata (1.4 kB)
+Requirement already satisfied: six>=1.5 in ./.venv/lib64/python3.13/site-packages (from python-dateutil>=2.8.2->pandas>=1.2.4->pymilvus) (1.17.0)
+Downloading pymilvus-2.6.6-py3-none-any.whl (285 kB)
+Using cached pandas-2.3.3-cp313-cp313-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl (12.3 MB)
+Using cached setuptools-80.9.0-py3-none-any.whl (1.2 MB)
+Downloading tzdata-2025.3-py2.py3-none-any.whl (348 kB)
+Installing collected packages: tzdata, setuptools, pandas, pymilvus
+
+Successfully installed pandas-2.3.3 pymilvus-2.6.6 setuptools-80.9.0 tzdata-2025.3

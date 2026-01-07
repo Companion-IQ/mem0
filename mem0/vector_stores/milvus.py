@@ -68,6 +68,11 @@ class MilvusDB(VectorStoreBase):
 
         if self.client.has_collection(collection_name):
             logger.info(f"Collection {collection_name} already exists. Skipping creation.")
+            # Ensure collection is loaded into memory for search operations
+            load_state = self.client.get_load_state(collection_name=collection_name)
+            if load_state.get("state") != "Loaded":
+                logger.info(f"Loading collection {collection_name} into memory.")
+                self.client.load_collection(collection_name=collection_name)
         else:
             fields = [
                 FieldSchema(name="id", dtype=DataType.VARCHAR, is_primary=True, max_length=512),
@@ -77,10 +82,52 @@ class MilvusDB(VectorStoreBase):
 
             schema = CollectionSchema(fields, enable_dynamic_field=True)
 
-            index = self.client.prepare_index_params(
-                field_name="vectors", metric_type=metric_type, index_type="AUTOINDEX", index_name="vector_index"
+            # Create index parameters for vector field and JSON metadata fields
+            index_params = self.client.prepare_index_params()
+
+            # Vector index for similarity search
+            index_params.add_index(
+                field_name="vectors",
+                metric_type=metric_type,
+                index_type="AUTOINDEX",
+                index_name="vector_index"
             )
-            self.client.create_collection(collection_name=collection_name, schema=schema, index_params=index)
+
+            # JSON path indexes for faster metadata filtering (Milvus 2.5.11+)
+            # Index user_id for user-scoped queries
+            index_params.add_index(
+                field_name="metadata",
+                index_type="INVERTED",
+                index_name="user_id_index",
+                params={
+                    "json_path": 'metadata["user_id"]',
+                    "json_cast_type": "varchar"
+                }
+            )
+
+            # Index event_dates array for date-based filtering
+            index_params.add_index(
+                field_name="metadata",
+                index_type="INVERTED",
+                index_name="event_dates_index",
+                params={
+                    "json_path": 'metadata["event_dates"]',
+                    "json_cast_type": "array_varchar"
+                }
+            )
+
+            # Index entity_names array for entity-based filtering
+            index_params.add_index(
+                field_name="metadata",
+                index_type="INVERTED",
+                index_name="entity_names_index",
+                params={
+                    "json_path": 'metadata["entity_names"]',
+                    "json_cast_type": "array_varchar"
+                }
+            )
+
+            self.client.create_collection(collection_name=collection_name, schema=schema, index_params=index_params)
 
     def insert(self, ids, vectors, payloads, **kwargs: Optional[dict[str, any]]):
         """Insert vectors into a collection.
@@ -101,14 +148,47 @@ class MilvusDB(VectorStoreBase):
         """Prepare filters for efficient query.
 
         Args:
-            filters (dict): filters [user_id, agent_id, run_id]
+            filters (dict): filters [user_id, agent_id, run_id] or advanced operators like:
+                - {"field": {"in": [values]}} for json_contains_any
+                - {"field": {"contains": value}} for json_contains
+                - {"field": {"all": [values]}} for json_contains_all
 
         Returns:
-            str: formated filter.
+            str: formatted filter expression.
         """
         operands = []
         for key, value in filters.items():
-            if isinstance(value, str):
+            if isinstance(value, dict):
+                # Handle advanced operators for entity filtering
+                if "in" in value:
+                    # json_contains_any - check if field contains ANY of the values
+                    values_list = value["in"]
+                    if isinstance(values_list, list):
+                        formatted_values = [f'"{v}"' if isinstance(v, str) else str(v) for v in values_list]
+                        operands.append(f'json_contains_any(metadata["{key}"], [{", ".join(formatted_values)}])')
+                elif "contains" in value:
+                    # json_contains - check if field contains a single value
+                    v = value["contains"]
+                    if isinstance(v, str):
+                        operands.append(f'json_contains(metadata["{key}"], "{v}")')
+                    else:
+                        operands.append(f'json_contains(metadata["{key}"], {v})')
+                elif "all" in value:
+                    # json_contains_all - check if field contains ALL values
+                    values_list = value["all"]
+                    if isinstance(values_list, list):
+                        formatted_values = [f'"{v}"' if isinstance(v, str) else str(v) for v in values_list]
+                        operands.append(f'json_contains_all(metadata["{key}"], [{", ".join(formatted_values)}])')
+                elif "gte" in value or "lte" in value or "gt" in value or "lt" in value:
+                    # Range operators for date filtering
+                    for op, op_val in value.items():
+                        op_map = {"gte": ">=", "lte": "<=", "gt": ">", "lt": "<"}
+                        if op in op_map:
+                            if isinstance(op_val, str):
+                                operands.append(f'(metadata["{key}"] {op_map[op]} "{op_val}")')
+                            else:
+                                operands.append(f'(metadata["{key}"] {op_map[op]} {op_val})')
+            elif isinstance(value, str):
                 operands.append(f'(metadata["{key}"] == "{value}")')
             else:
                 operands.append(f'(metadata["{key}"] == {value})')
@@ -156,6 +236,7 @@ class MilvusDB(VectorStoreBase):
         hits = self.client.search(
             collection_name=self.collection_name,
             data=[vectors],
+            anns_field="vectors",
             limit=limit,
             filter=query_filter,
             output_fields=["*"],

@@ -1,0 +1,10 @@
+Collecting pymongo
+  Downloading pymongo-4.15.5-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (22 kB)
+Collecting dnspython<3.0.0,>=1.16.0 (from pymongo)
+  Downloading dnspython-2.8.0-py3-none-any.whl.metadata (5.7 kB)
+Downloading pymongo-4.15.5-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (2.0 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 2.0/2.0 MB 1.1 MB/s eta 0:00:00
+Downloading dnspython-2.8.0-py3-none-any.whl (331 kB)
+Installing collected packages: dnspython, pymongo
+
+Successfully installed dnspython-2.8.0 pymongo-4.15.5
